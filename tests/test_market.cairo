@@ -1,0 +1,211 @@
+use starknet::ContractAddress;
+use snforge_std::{
+    declare, ContractClassTrait, DeclareResultTrait,
+    start_cheat_caller_address, stop_cheat_caller_address,
+    start_cheat_block_timestamp, stop_cheat_block_timestamp,
+};
+use btc_prediction_market::contracts::market_logic::{IMarketLogicDispatcher, IMarketLogicDispatcherTrait};
+use btc_prediction_market::contracts::market_factory::{IMarketFactoryDispatcher, IMarketFactoryDispatcherTrait};
+use btc_prediction_market::contracts::oracle_adapter::{IOracleAdapterDispatcher, IOracleAdapterDispatcherTrait};
+use btc_prediction_market::contracts::synthetic_btc::{ISyntheticBTCDispatcher, ISyntheticBTCDispatcherTrait};
+
+fn OWNER() -> ContractAddress { starknet::contract_address_const::<0x1>() }
+fn USER1() -> ContractAddress { starknet::contract_address_const::<0x2>() }
+fn VAULT() -> ContractAddress  { starknet::contract_address_const::<0x99>() }
+
+fn deploy_market_logic() -> IMarketLogicDispatcher {
+    let contract = declare("MarketLogic").unwrap().contract_class();
+    let mut calldata = array![];
+    OWNER().serialize(ref calldata);
+    let (address, _) = contract.deploy(@calldata).unwrap();
+    IMarketLogicDispatcher { contract_address: address }
+}
+
+fn deploy_factory(market_address: ContractAddress) -> IMarketFactoryDispatcher {
+    let contract = declare("MarketFactory").unwrap().contract_class();
+    let mut calldata = array![];
+    OWNER().serialize(ref calldata);
+    let (address, _) = contract.deploy(@calldata).unwrap();
+    let factory = IMarketFactoryDispatcher { contract_address: address };
+
+    start_cheat_caller_address(address, OWNER());
+    factory.set_contracts(
+        market_address,
+        starknet::contract_address_const::<0x10>(),
+        starknet::contract_address_const::<0x11>(),
+        starknet::contract_address_const::<0x12>(),
+    );
+    stop_cheat_caller_address(address);
+    factory
+}
+
+fn deploy_oracle(market_address: ContractAddress) -> IOracleAdapterDispatcher {
+    let contract = declare("OracleAdapter").unwrap().contract_class();
+    let mut calldata = array![];
+    OWNER().serialize(ref calldata);
+    let (address, _) = contract.deploy(@calldata).unwrap();
+    let oracle = IOracleAdapterDispatcher { contract_address: address };
+
+    start_cheat_caller_address(address, OWNER());
+    oracle.set_market_contract(market_address);
+    stop_cheat_caller_address(address);
+    oracle
+}
+
+// ─── TEST 1: Factory creates market ──────────────────────────────────────────
+#[test]
+fn test_factory_creates_market() {
+    let market = deploy_market_logic();
+    let factory = deploy_factory(market.contract_address);
+
+    // Wire market to accept factory calls
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.set_vault_address(VAULT());
+    stop_cheat_caller_address(market.contract_address);
+
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    start_cheat_caller_address(market.contract_address, OWNER());
+    let market_id = market.create_market('Will ETH flip BTC?', 9000_u64, 0_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    assert(market_id == 0, 'Should be first market');
+    let m = market.get_market(0);
+    assert(m.question == 'Will ETH flip BTC?', 'Wrong question');
+    assert(m.end_time == 9000_u64, 'Wrong end time');
+}
+
+// ─── TEST 2: Multiple markets ─────────────────────────────────────────────────
+#[test]
+fn test_multiple_markets() {
+    let market = deploy_market_logic();
+
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    start_cheat_caller_address(market.contract_address, OWNER());
+    let id0 = market.create_market('BTC 100k by EOY?', 5000_u64, 0_u256);
+    let id1 = market.create_market('Fed cuts rates?', 6000_u64, 0_u256);
+    let id2 = market.create_market('ETF approved?', 7000_u64, 0_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    assert(id0 == 0, 'First market id wrong');
+    assert(id1 == 1, 'Second market id wrong');
+    assert(id2 == 2, 'Third market id wrong');
+    assert(market.get_market_count() == 3, 'Should have 3 markets');
+}
+
+// ─── TEST 3: Pool accounting ──────────────────────────────────────────────────
+#[test]
+fn test_pool_accounting() {
+    let market = deploy_market_logic();
+
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.set_vault_address(VAULT());
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    let market_id = market.create_market('BTC halving pump?', 5000_u64, 0_u256);
+    stop_cheat_caller_address(market.contract_address);
+
+    // Place bets from vault
+    start_cheat_caller_address(market.contract_address, VAULT());
+    market.record_shielded_bet(market_id, 1, 300_u256); // YES
+    market.record_shielded_bet(market_id, 1, 200_u256); // YES
+    market.record_shielded_bet(market_id, 0, 100_u256); // NO
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    assert(market.get_yes_pool(market_id) == 500_u256, 'YES pool should be 500');
+    assert(market.get_no_pool(market_id) == 100_u256, 'NO pool should be 100');
+}
+
+// ─── TEST 4: Oracle propose and finalize ──────────────────────────────────────
+#[test]
+fn test_oracle_propose_and_finalize() {
+    let market = deploy_market_logic();
+    let oracle = deploy_oracle(market.contract_address);
+
+    // Wire oracle as authorized resolver in market
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.set_oracle_address(oracle.contract_address);
+    market.set_vault_address(VAULT());
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    let market_id = market.create_market('BTC above 80k?', 1000_u64, 0_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    // Propose resolution at t=2000 (after market end)
+    start_cheat_block_timestamp(oracle.contract_address, 2000_u64);
+    start_cheat_caller_address(oracle.contract_address, OWNER());
+    oracle.propose_resolution(market_id, 1); // YES wins
+    stop_cheat_caller_address(oracle.contract_address);
+
+    assert(oracle.get_proposed_outcome(market_id) == 1, 'Outcome should be YES');
+    assert(oracle.get_resolution_status(market_id) == 1, 'Status should be PROPOSED');
+
+    // Finalize after dispute window (86400 seconds later)
+    stop_cheat_block_timestamp(oracle.contract_address);
+    start_cheat_block_timestamp(oracle.contract_address, 2000_u64 + 86401_u64);
+    start_cheat_block_timestamp(market.contract_address, 2000_u64 + 86401_u64);
+
+    start_cheat_caller_address(oracle.contract_address, OWNER());
+    oracle.finalize_resolution(market_id);
+    stop_cheat_caller_address(oracle.contract_address);
+
+    assert(oracle.get_resolution_status(market_id) == 3, 'Status should be FINALIZED');
+    assert(market.get_winning_outcome(market_id) == 1, 'Market should show YES won');
+}
+
+// ─── TEST 5: Payout math correctness ─────────────────────────────────────────
+#[test]
+fn test_payout_math() {
+    let market = deploy_market_logic();
+
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.set_vault_address(VAULT());
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    // 200 initial liquidity = 100 YES + 100 NO
+    let market_id = market.create_market('Payout test', 5000_u64, 200_u256);
+    stop_cheat_caller_address(market.contract_address);
+
+    // Add 100 more to YES pool
+    start_cheat_caller_address(market.contract_address, VAULT());
+    market.record_shielded_bet(market_id, 1, 100_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    // YES pool = 200, NO pool = 100
+    // Resolve YES wins
+    start_cheat_block_timestamp(market.contract_address, 6000_u64);
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.resolve_market(market_id, 1);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    // Bet 100 on YES: payout = 100 + (100 * 100) / 200 = 100 + 50 = 150
+    let payout = market.calculate_payout(market_id, 100_u256);
+    assert(payout == 150_u256, 'Payout should be 150');
+}
+
+// ─── TEST 6: Cannot bet on resolved market ────────────────────────────────────
+#[test]
+#[should_panic(expected: 'Market already resolved')]
+fn test_cannot_bet_on_resolved_market() {
+    let market = deploy_market_logic();
+
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.set_vault_address(VAULT());
+    start_cheat_block_timestamp(market.contract_address, 100_u64);
+    let market_id = market.create_market('Resolved test', 1000_u64, 0_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+
+    start_cheat_block_timestamp(market.contract_address, 2000_u64);
+    start_cheat_caller_address(market.contract_address, OWNER());
+    market.resolve_market(market_id, 0);
+    stop_cheat_caller_address(market.contract_address);
+
+    // This should panic
+    start_cheat_caller_address(market.contract_address, VAULT());
+    market.record_shielded_bet(market_id, 1, 50_u256);
+    stop_cheat_caller_address(market.contract_address);
+    stop_cheat_block_timestamp(market.contract_address);
+}
