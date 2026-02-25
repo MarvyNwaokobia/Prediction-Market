@@ -1,29 +1,60 @@
 use starknet::ContractAddress;
 
+/// Minimal ERC-20 interface — compatible with USDC and any OpenZeppelin ERC-20 on Starknet.
+#[starknet::interface]
+pub trait IERC20<TContractState> {
+    fn transfer_from(
+        ref self: TContractState, sender: ContractAddress, recipient: ContractAddress, amount: u256,
+    ) -> bool;
+    fn transfer(ref self: TContractState, recipient: ContractAddress, amount: u256) -> bool;
+}
+
 #[starknet::interface]
 pub trait IShieldedVault<TContractState> {
     fn deposit(ref self: TContractState, commitment: felt252, amount: u256);
-    fn withdraw(ref self: TContractState, nullifier: felt252, root: felt252, recipient: ContractAddress, amount: u256);
-    fn place_bet(ref self: TContractState, nullifier: felt252, root: felt252, market_id: u64, outcome: u8, amount: u256, new_commitment: felt252);
-    fn claim_winnings(ref self: TContractState, nullifier: felt252, root: felt252, market_id: u64, new_commitment: felt252);
+    fn withdraw(
+        ref self: TContractState,
+        nullifier: felt252,
+        root: felt252,
+        recipient: ContractAddress,
+        amount: u256,
+    );
+    fn place_bet(
+        ref self: TContractState,
+        nullifier: felt252,
+        root: felt252,
+        market_id: u64,
+        outcome: u8,
+        amount: u256,
+        new_commitment: felt252,
+    );
+    fn claim_winnings(
+        ref self: TContractState,
+        nullifier: felt252,
+        root: felt252,
+        market_id: u64,
+        new_commitment: felt252,
+    );
     fn get_root(self: @TContractState) -> felt252;
     fn get_tree_size(self: @TContractState) -> u64;
     fn is_nullifier_spent(self: @TContractState, nullifier: felt252) -> bool;
     fn is_known_root(self: @TContractState, root: felt252) -> bool;
     fn get_commitment(self: @TContractState, index: u64) -> felt252;
     fn set_market_contract(ref self: TContractState, market_contract: ContractAddress);
-    fn set_sbtc_contract(ref self: TContractState, sbtc_contract: ContractAddress);
+    fn set_token_contract(ref self: TContractState, token_contract: ContractAddress);
 }
 
 #[starknet::contract]
 pub mod ShieldedVault {
-    use starknet::{ContractAddress, get_caller_address, get_contract_address};
-    use starknet::storage::{
-        StoragePointerReadAccess, StoragePointerWriteAccess,
-        Map, StorageMapReadAccess, StorageMapWriteAccess
+    use btc_prediction_market::contracts::market_logic::{
+        IMarketLogicDispatcher, IMarketLogicDispatcherTrait,
     };
-    use btc_prediction_market::contracts::synthetic_btc::{ISyntheticBTCDispatcher, ISyntheticBTCDispatcherTrait};
-    use btc_prediction_market::contracts::market_logic::{IMarketLogicDispatcher, IMarketLogicDispatcherTrait};
+    use starknet::storage::{
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
+    use starknet::{ContractAddress, get_caller_address, get_contract_address};
+    use super::{IERC20Dispatcher, IERC20DispatcherTrait};
 
     // Merkle tree depth — supports 2^20 = ~1M commitments
     const TREE_DEPTH: u8 = 20;
@@ -34,24 +65,19 @@ pub mod ShieldedVault {
         // Admin
         owner: ContractAddress,
         market_contract: ContractAddress,
-        sbtc_contract: ContractAddress,
-
+        token_contract: ContractAddress, // USDC (or any ERC-20) used as collateral
         // Merkle tree
         // Leaves: commitment hashes
         leaves: Map<u64, felt252>,
         tree_size: u64,
         current_root: felt252,
-
         // Root history for proof validation (last 30 roots are valid)
         root_history: Map<u64, felt252>,
         root_history_index: u64,
-
         // Nullifier registry — once spent, never again
         nullifiers: Map<felt252, bool>,
-
         // Internal balances per commitment (for bet tracking)
         commitment_amounts: Map<felt252, u256>,
-
         // Bet tracking: nullifier -> market_id -> amount bet
         bet_amounts: Map<(felt252, u64), u256>,
         bet_outcomes: Map<(felt252, u64), u8>,
@@ -121,8 +147,8 @@ pub mod ShieldedVault {
 
     #[abi(embed_v0)]
     impl ShieldedVaultImpl of super::IShieldedVault<ContractState> {
-
-        // ─── DEPOSIT ───────────────────────────────────────────────────────────
+        // ─── DEPOSIT
+        // ───────────────────────────────────────────────────────────
         // User deposits sBTC and registers a commitment into the Merkle tree.
         // The commitment = pedersen(secret, amount) computed off-chain by user.
         // No link between depositor address and commitment on-chain.
@@ -131,11 +157,11 @@ pub mod ShieldedVault {
             assert(amount > 0, 'Amount must be positive');
             assert(self.commitment_amounts.read(commitment) == 0, 'Commitment already exists');
 
-            // Pull sBTC from caller
-            let sbtc = ISyntheticBTCDispatcher { contract_address: self.sbtc_contract.read() };
+            // Pull token (USDC) from caller
+            let token = IERC20Dispatcher { contract_address: self.token_contract.read() };
             let caller = get_caller_address();
             let this = get_contract_address();
-            sbtc.transfer_from(caller, this, amount);
+            token.transfer_from(caller, this, amount);
 
             // Store commitment amount
             self.commitment_amounts.write(commitment, amount);
@@ -154,7 +180,8 @@ pub mod ShieldedVault {
             self.emit(NewCommitment { commitment, leaf_index });
         }
 
-        // ─── WITHDRAW ──────────────────────────────────────────────────────────
+        // ─── WITHDRAW
+        // ──────────────────────────────────────────────────────────
         // User proves they know the secret behind a commitment and withdraws.
         // Nullifier prevents double-spend. Root proves membership.
         fn withdraw(
@@ -162,7 +189,7 @@ pub mod ShieldedVault {
             nullifier: felt252,
             root: felt252,
             recipient: ContractAddress,
-            amount: u256
+            amount: u256,
         ) {
             // Validate nullifier not spent
             assert(!self.nullifiers.read(nullifier), 'Nullifier already spent');
@@ -187,14 +214,15 @@ pub mod ShieldedVault {
             // Update commitment amount
             self.commitment_amounts.write(expected_nullifier, committed_amount - amount);
 
-            // Transfer sBTC to recipient
-            let sbtc = ISyntheticBTCDispatcher { contract_address: self.sbtc_contract.read() };
-            sbtc.transfer(recipient, amount);
+            // Transfer token (USDC) to recipient
+            let token = IERC20Dispatcher { contract_address: self.token_contract.read() };
+            token.transfer(recipient, amount);
 
             self.emit(Withdrawal { nullifier, recipient, amount });
         }
 
-        // ─── PLACE BET ─────────────────────────────────────────────────────────
+        // ─── PLACE BET
+        // ─────────────────────────────────────────────────────────
         // Anonymous bet: spend existing commitment, create new one for remainder.
         // Proves membership without revealing which commitment is being spent.
         fn place_bet(
@@ -221,10 +249,11 @@ pub mod ShieldedVault {
             // Mark nullifier spent
             self.nullifiers.write(nullifier, true);
 
-            // Record bet
-            self.bet_amounts.write((nullifier, market_id), amount);
-            self.bet_outcomes.write((nullifier, market_id), outcome);
-            self.bet_exists.write((nullifier, market_id), true);
+            // Record bet keyed on new_commitment (the "bet receipt" note).
+            // This decouples the spending nullifier from the claim identity.
+            self.bet_amounts.write((new_commitment, market_id), amount);
+            self.bet_outcomes.write((new_commitment, market_id), outcome);
+            self.bet_exists.write((new_commitment, market_id), true);
 
             // Register new commitment for remainder
             let remainder = committed_amount - amount;
@@ -246,7 +275,8 @@ pub mod ShieldedVault {
             self.emit(BetPlaced { nullifier, market_id, outcome, amount, new_commitment });
         }
 
-        // ─── CLAIM WINNINGS ────────────────────────────────────────────────────
+        // ─── CLAIM WINNINGS
+        // ────────────────────────────────────────────────────
         // Winner proves their nullifier corresponds to a winning bet.
         // Winnings re-enter the shielded pool as a new commitment.
         fn claim_winnings(
@@ -289,7 +319,8 @@ pub mod ShieldedVault {
             self.emit(WinningsClaimed { nullifier, market_id, new_commitment });
         }
 
-        // ─── VIEWS ─────────────────────────────────────────────────────────────
+        // ─── VIEWS
+        // ─────────────────────────────────────────────────────────────
         fn get_root(self: @ContractState) -> felt252 {
             self.current_root.read()
         }
@@ -315,16 +346,16 @@ pub mod ShieldedVault {
             self.market_contract.write(market_contract);
         }
 
-        fn set_sbtc_contract(ref self: ContractState, sbtc_contract: ContractAddress) {
+        fn set_token_contract(ref self: ContractState, token_contract: ContractAddress) {
             assert(get_caller_address() == self.owner.read(), 'Only owner');
-            self.sbtc_contract.write(sbtc_contract);
+            self.token_contract.write(token_contract);
         }
     }
 
-    // ─── INTERNAL ──────────────────────────────────────────────────────────────
+    // ─── INTERNAL
+    // ──────────────────────────────────────────────────────────────
     #[generate_trait]
     impl InternalImpl of InternalTrait {
-
         // Simplified root computation using Pedersen hash up the tree path
         // In production this would be a full Merkle tree recompute
         fn _compute_root(self: @ContractState, leaf_index: u64, leaf: felt252) -> felt252 {
@@ -366,7 +397,7 @@ pub mod ShieldedVault {
                     break;
                 }
                 i += 1;
-            };
+            }
             found
         }
 

@@ -1,0 +1,4 @@
+[sncast.default]
+account = "myaccount"
+accounts-file = "~/.starknet_accounts/starknet_open_zeppelin_accounts.json"
+url = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/kwgGr9GGk4YyLXuGfEvpITv1jpvn3PgP"

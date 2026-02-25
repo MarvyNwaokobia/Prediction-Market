@@ -1,0 +1,6 @@
+[toolchain]
+# scarb 2.14.0 binary is x86_64-apple-darwin on this machine.
+# This must match so the snforge_scarb_plugin proc-macro dylib
+# is compiled for the correct architecture.
+channel = "stable"
+targets = ["x86_64-apple-darwin"]
