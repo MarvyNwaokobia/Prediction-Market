@@ -50,7 +50,7 @@ fn deploy_vault(
 
     // Wire up contracts
     start_cheat_caller_address(address, OWNER());
-    vault.set_sbtc_contract(sbtc_address);
+    vault.set_token_contract(sbtc_address);
     vault.set_market_contract(market_address);
     stop_cheat_caller_address(address);
 
