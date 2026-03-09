@@ -77,8 +77,23 @@ function MarketCard({
   let question = "Unknown";
   try { question = shortString.decodeShortString(BigInt(m.question).toString(16).padStart(2, "0").startsWith("0x") ? BigInt(m.question).toString() : `0x${BigInt(m.question).toString(16)}`); } catch { question = `Market #${marketId}`; }
 
-  const endDate = new Date(Number(m.end_time) * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const endTimestamp = Number(m.end_time) * 1000;
+  const endDate = new Date(endTimestamp).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   const resolved = Boolean(m.resolved);
+  const ended = Date.now() > endTimestamp;
+  const bettable = !resolved && !ended;
+
+  // Time remaining helper
+  const timeRemaining = (() => {
+    if (resolved || ended) return null;
+    const diff = endTimestamp - Date.now();
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    if (days > 0) return `${days}d ${hours}h left`;
+    const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    if (hours > 0) return `${hours}h ${mins}m left`;
+    return `${mins}m left`;
+  })();
 
   const marketData: MarketData = {
     id: marketId,
@@ -91,28 +106,46 @@ function MarketCard({
     volume: formatStrk(total),
   };
 
+  // Status badge
+  const statusBadge = resolved
+    ? <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+      Resolved
+    </span>
+    : ended
+      ? <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        Ended
+      </span>
+      : <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />Active
+      </span>;
+
   return (
-    <div className="group w-full bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.06] hover:border-white/10 rounded-2xl px-8 py-6 transition-all duration-200">
+    <div className={`group w-full border rounded-2xl px-8 py-6 transition-all duration-200 ${bettable
+        ? "bg-white/[0.02] hover:bg-white/[0.04] border-white/[0.06] hover:border-white/10"
+        : "bg-white/[0.01] border-white/[0.04] opacity-75"
+      }`}>
       <div className="flex items-center justify-between gap-8">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-3 mb-3">
-            {resolved
-              ? <span className="text-xs bg-white/5 text-gray-600 border border-white/10 px-2.5 py-0.5 rounded-full">Resolved</span>
-              : <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 bg-green-400 rounded-full" />Active
-              </span>
-            }
-            <span className="text-gray-700 text-xs">Ends {endDate}</span>
+            {statusBadge}
+            <span className="text-gray-700 text-xs">
+              {resolved ? `Ended ${endDate}` : ended ? `Ended ${endDate}` : `Ends ${endDate}`}
+            </span>
+            {timeRemaining && (
+              <span className="text-orange-400/70 text-xs font-medium">{timeRemaining}</span>
+            )}
             <span className="text-gray-700 text-xs">Vol: <span className="text-gray-500">{formatStrk(total)}</span></span>
           </div>
-          <h4 className="text-white font-semibold text-xl leading-snug mb-5">{question}</h4>
+          <h4 className={`font-semibold text-xl leading-snug mb-5 ${bettable ? "text-white" : "text-gray-400"}`}>{question}</h4>
           <div className="mb-3">
             <div className="flex justify-between text-xs mb-1.5">
-              <span className="text-green-400 font-medium">YES {yesOdds}%</span>
-              <span className="text-red-400 font-medium">NO {100 - yesOdds}%</span>
+              <span className={`${bettable ? "text-green-400" : "text-green-400/50"} font-medium`}>YES {yesOdds}%</span>
+              <span className={`${bettable ? "text-red-400" : "text-red-400/50"} font-medium`}>NO {100 - yesOdds}%</span>
             </div>
             <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-              <div className="h-full bg-green-500 rounded-full" style={{ width: `${yesOdds}%` }} />
+              <div className={`h-full rounded-full ${bettable ? "bg-green-500" : "bg-green-500/40"}`} style={{ width: `${yesOdds}%` }} />
             </div>
           </div>
           <div className="flex gap-5 text-xs text-gray-600">
@@ -121,7 +154,7 @@ function MarketCard({
           </div>
         </div>
         <div className="flex-shrink-0">
-          {!resolved && (
+          {bettable ? (
             canBet ? (
               <button onClick={() => onBet(marketData)}
                 className="bg-orange-500/10 hover:bg-orange-500 border border-orange-500/30 hover:border-orange-500 text-orange-400 hover:text-white font-semibold px-6 py-3 rounded-xl text-sm transition-all duration-200 whitespace-nowrap">
@@ -130,6 +163,15 @@ function MarketCard({
             ) : (
               <div className="text-gray-700 text-xs text-center max-w-[100px] leading-relaxed">Connect wallets to bet</div>
             )
+          ) : (
+            <div className="flex flex-col items-center gap-1.5">
+              <span className={`text-xs font-medium px-4 py-2 rounded-xl border ${resolved
+                  ? "text-blue-400/70 border-blue-500/20 bg-blue-500/5"
+                  : "text-red-400/70 border-red-500/20 bg-red-500/5"
+                }`}>
+                {resolved ? "Settled" : "Awaiting Resolution"}
+              </span>
+            </div>
           )}
         </div>
       </div>
